@@ -1,0 +1,26 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "git-pr-summarizer"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+dependencies = [
+    "typer",
+    "gitpython",
+    "httpx",
+    "tiktoken",
+    "rich",
+    "python-dotenv",
+]
+
+[project.scripts]
+pr-summarize = "src.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: git-pr-summarizer
+Version: 0.1.0
+Requires-Python: >=3.10
+Requires-Dist: typer
+Requires-Dist: gitpython
+Requires-Dist: httpx
+Requires-Dist: tiktoken
+Requires-Dist: rich
+Requires-Dist: python-dotenv
