@@ -198,48 +198,49 @@ def analyze_diff_chunk(
 
 def merge_results(results: list[dict]) -> dict:
     """
-    Merges multiple chunk summaries into one result.
+    Merges multiple chunk results into one.
+    Updated in Week 2 to handle empty lists and None values safely.
     """
+    # Filter out any None or non-dict results defensively
+    results = [r for r in results if isinstance(r, dict)]
+
+    if not results:
+        return {
+            "title": "Update codebase",
+            "summary": "Changes made to the codebase.",
+            "changes": [],
+            "risks": [],
+            "notes": "",
+        }
 
     if len(results) == 1:
         return results[0]
 
     merged = {
-        "title": results[0].get("title", ""),
+        "title": results[0].get("title", "Update codebase"),
         "summary": " ".join(
-            r.get("summary", "")
-            for r in results
+            r.get("summary", "") for r in results
+            if r.get("summary")
         ),
         "changes": [],
         "risks": [],
         "notes": "",
     }
 
-    seen_changes = set()
-    seen_risks = set()
+    seen_changes: set[str] = set()
+    seen_risks: set[str] = set()
 
     for r in results:
-
         for change in r.get("changes", []):
-
-            if change not in seen_changes:
-
+            if change and change not in seen_changes:
                 merged["changes"].append(change)
                 seen_changes.add(change)
-
         for risk in r.get("risks", []):
-
-            if risk not in seen_risks:
-
+            if risk and risk not in seen_risks:
                 merged["risks"].append(risk)
                 seen_risks.add(risk)
 
-    notes = [
-        r.get("notes", "")
-        for r in results
-        if r.get("notes", "")
-    ]
-
+    notes = [r.get("notes", "") for r in results if r.get("notes", "")]
     merged["notes"] = " | ".join(notes)
 
     return merged

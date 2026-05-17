@@ -1,430 +1,355 @@
 # src/cli.py
-
 import subprocess
+import sys
 import typer
-
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    TextColumn
-)
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.syntax import Syntax
+from rich.table import Table
 
-from src.parser import (
-    parse_diff,
-    get_diff_summary
-)
-
+from src.parser import parse_diff, get_diff_summary
 from src.chunker import chunk_files
-
-from src.llm import (
-    analyze_diff_chunk,
-    merge_results
-)
-
+from src.llm import analyze_diff_chunk, merge_results
 from src.config import DEFAULT_PROVIDER
 
+# ── NEW ── Import the three new modules
+from src.validator import safe_validate
+from src.formatter import to_markdown, to_github_body
+from src.codeowners import suggest_reviewers, create_sample_codeowners
 
-# =========================================================
-# CLI APP SETUP
-# =========================================================
-
-app = typer.Typer(
-    help="AI-powered git PR description generator."
-)
-
+app = typer.Typer(help="AI-powered git PR description generator.")
 console = Console()
 
 
-# =========================================================
-# GIT DIFF FETCHER
-# =========================================================
-
 def get_git_diff(base: str = "HEAD~1") -> str:
-    """
-    Runs:
-        git diff <base>
-
-    and returns output as a string.
-    """
-
+    """Runs git diff and returns output as a string."""
     result = subprocess.run(
-
         ["git", "diff", base],
-
         capture_output=True,
-
         text=True,
-
+        encoding="utf-8",        # ← add this line
+        errors="replace",        # ← add this line — replaces unreadable chars instead of crashing
         cwd=".",
     )
-
     if result.returncode != 0:
-
-        console.print(
-            f"[red]Git diff failed:[/red] {result.stderr}"
-        )
-
+        console.print(f"[red]Error running git diff:[/red] {result.stderr}")
         raise typer.Exit(1)
-
     return result.stdout
 
 
-# =========================================================
-# MAIN CLI COMMAND
-# =========================================================
+def get_repo_root() -> str:
+    """Returns the root directory of the current git repo."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",        # ← add this
+        errors="replace",        # ← add this
+        cwd=".",
+    )
+    if result.returncode != 0:
+        return "."
+    return result.stdout.strip()
 
 @app.command()
-
 def main(
-
     base: str = typer.Option(
-        "HEAD~1",
-        "--base",
-        "-b",
+        "HEAD~1", "--base", "-b",
         help="Base commit to diff against."
     ),
-
     provider: str = typer.Option(
-        DEFAULT_PROVIDER,
-        "--provider",
-        "-p",
-        help="LLM provider: 'groq' or 'gemini'"
+        DEFAULT_PROVIDER, "--provider", "-p",
+        help="LLM provider: 'openai' or 'claude'."
     ),
-
     dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Skip LLM calls."
+        False, "--dry-run",
+        help="Parse and chunk only. Skip LLM call."
     ),
-
     verbose: bool = typer.Option(
-        False,
-        "--verbose",
-        "-v",
-        help="Show detailed debug output."
+        False, "--verbose", "-v",
+        help="Show chunk previews and extra detail."
+    ),
+    # ── NEW ── Copy flag
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy the Markdown output to clipboard."
+    ),
+    # ── NEW ── GitHub PR creation flag
+    create_pr: bool = typer.Option(
+        False, "--create-pr",
+        help="Create a GitHub PR using the gh CLI."
+    ),
+    # ── NEW ── Init codeowners flag
+    init_codeowners: bool = typer.Option(
+        False, "--init-codeowners",
+        help="Create a sample CODEOWNERS file in .github/ and exit."
     ),
 ):
     """
-    Main PR summarization command.
+    Generate a PR description from your current git diff.
+
+    Examples:\n
+        pr-summarize\n
+        pr-summarize --base main\n
+        pr-summarize --provider claude --copy\n
+        pr-summarize --create-pr\n
+        pr-summarize --dry-run --verbose
     """
 
-    # =====================================================
-    # STEP 1 — GET DIFF
-    # =====================================================
+    # ── NEW ── Handle --init-codeowners before anything else
+    if init_codeowners:
+        import os
+        github_dir = os.path.join(get_repo_root(), ".github")
+        os.makedirs(github_dir, exist_ok=True)
+        path = os.path.join(github_dir, "CODEOWNERS")
+        if os.path.exists(path):
+            console.print(f"[yellow]CODEOWNERS already exists at {path}[/yellow]")
+        else:
+            with open(path, "w") as f:
+                f.write(create_sample_codeowners())
+            console.print(f"[green]Created CODEOWNERS at {path}[/green]")
+            console.print("Edit it to add your team's GitHub usernames.")
+        raise typer.Exit(0)
 
-    console.print(
-        f"\n[bold]Fetching diff[/bold] "
-        f"against [cyan]{base}[/cyan]..."
-    )
-
+    # ── Step 1: Get diff ────────────────────────────────────────────────
+    console.print(f"\n[bold]Fetching diff[/bold] against [cyan]{base}[/cyan]...")
     diff_text = get_git_diff(base)
 
     if not diff_text.strip():
-
-        console.print(
-            "[yellow]No changes detected.[/yellow]"
-        )
-
+        console.print("[yellow]No changes detected.[/yellow] Commit something first.")
         raise typer.Exit(0)
 
-    # =====================================================
-    # STEP 2 — PARSE
-    # =====================================================
-
+    # ── Step 2: Parse ───────────────────────────────────────────────────
     files = parse_diff(diff_text)
-
     summary = get_diff_summary(files)
 
     console.print(
-        f"Found "
-        f"[bold]{summary['total_files']}[/bold] "
-        f"changed file(s) — "
-        f"[green]+{summary['total_added']}[/green] "
-        f"/ "
+        f"Found [bold]{summary['total_files']}[/bold] changed file(s) — "
+        f"[green]+{summary['total_added']}[/green] / "
         f"[red]-{summary['total_removed']}[/red]"
     )
 
-    if summary["risky_files"] and verbose:
-
+    # ── NEW ── Show risky files in verbose mode
+    if summary["risky_files"]:
         console.print(
-            f"[yellow]Risky files:[/yellow] "
+            f"[yellow]⚠ Sensitive files:[/yellow] "
             f"{', '.join(summary['risky_files'])}"
         )
 
-    # =====================================================
-    # STEP 3 — CHUNK
-    # =====================================================
+    # ── NEW ── Reviewer suggestions from CODEOWNERS
+    repo_root = get_repo_root()
+    changed_filenames = [f.filename for f in files]
+    reviewer_data = suggest_reviewers(changed_filenames, repo_root=repo_root)
 
+    if reviewer_data["codeowners_found"] and reviewer_data["reviewers"]:
+        console.print(
+            f"[blue]Suggested reviewers:[/blue] "
+            f"{', '.join(reviewer_data['reviewers'])}"
+        )
+    elif not reviewer_data["codeowners_found"] and verbose:
+        console.print(
+            "[dim]No CODEOWNERS file found. "
+            "Run --init-codeowners to create one.[/dim]"
+        )
+
+    # ── Step 3: Chunk ───────────────────────────────────────────────────
     chunks = chunk_files(files)
 
     if verbose:
-
         console.print(
-            f"Split into "
-            f"[bold]{len(chunks)}[/bold] "
-            f"chunk(s)."
+            f"Split into [bold]{len(chunks)}[/bold] chunk(s) "
+            f"for LLM context window."
         )
-
         for i, chunk in enumerate(chunks):
-
-            console.print(
-                f"\n[dim]--- Chunk {i+1} ---[/dim]"
-            )
-
-            console.print(
-                f"[dim]{chunk[:300]}...[/dim]"
-            )
+            console.print(f"\n[dim]--- Chunk {i+1} preview ---[/dim]")
+            console.print(f"[dim]{chunk[:300]}...[/dim]")
 
     if dry_run:
-
-        console.print(
-            "\n[yellow]Dry run mode[/yellow]"
-        )
-
-        console.print(
-            f"Would send "
-            f"{len(chunks)} chunk(s) "
-            f"to [bold]{provider}[/bold]"
-        )
-
+        console.print("\n[yellow]--dry-run:[/yellow] Skipping LLM call.")
         raise typer.Exit(0)
 
-    # =====================================================
-    # STEP 4 — CALL LLM
-    # =====================================================
-
-    results = []
+    # ── Step 4: Call LLM ────────────────────────────────────────────────
+    raw_results = []
 
     with Progress(
-
         SpinnerColumn(),
-
-        TextColumn(
-            "[progress.description]{task.description}"
-        ),
-
+        TextColumn("[progress.description]{task.description}"),
         console=console,
-
     ) as progress:
-
-        task = progress.add_task(
-
-            f"Analyzing with {provider}...",
-
-            total=len(chunks)
-        )
-
+        task = progress.add_task("Analyzing...", total=len(chunks))
         for i, chunk in enumerate(chunks):
-
             progress.update(
-
                 task,
-
-                description=(
-                    f"Analyzing chunk "
-                    f"{i+1}/{len(chunks)}..."
-                )
+                description=f"Analyzing chunk {i+1}/{len(chunks)}..."
             )
-
             try:
-
-                result = analyze_diff_chunk(
-                    chunk,
-                    provider=provider
-                )
-
-                results.append(result)
-
+                result = analyze_diff_chunk(chunk, provider=provider)
+                raw_results.append(result)
             except Exception as e:
-
-                console.print(
-                    f"[red]LLM Error:[/red] {e}"
-                )
-
+                console.print(f"[red]LLM error on chunk {i+1}:[/red] {e}")
                 raise typer.Exit(1)
-
             progress.advance(task)
 
-    # =====================================================
-    # STEP 5 — MERGE RESULTS
-    # =====================================================
+    # ── NEW ── Merge + Validate with Pydantic
+    # In Week 1 we passed the raw dict straight to rendering.
+    # Now we merge first, then run through Pydantic validation.
+    # safe_validate() never crashes — it fills in defaults if something is wrong.
+    merged_raw = merge_results(raw_results)
+    validated = safe_validate(merged_raw)
 
-    final = merge_results(results)
+    # ── NEW ── Add reviewer suggestions into the validated result's notes
+    # We append reviewer info to the notes field so it shows up in output.
+    if reviewer_data["reviewers"]:
+        reviewer_note = (
+            f"Suggested reviewers: {', '.join(reviewer_data['reviewers'])}"
+        )
+        if validated.notes:
+            validated.notes = validated.notes + " | " + reviewer_note
+        else:
+            validated.notes = reviewer_note
 
-    render_output(final, summary)
+    # ── Step 5: Render output ───────────────────────────────────────────
+    render_output(validated, summary, reviewer_data)
+
+    # ── NEW ── Build the markdown string for copy/gh operations
+    markdown_output = to_markdown(validated, summary)
+
+    # ── NEW ── --copy flag: put markdown on clipboard
+    if copy:
+        try:
+            import pyperclip
+            pyperclip.copy(markdown_output)
+            console.print(
+                "\n[green]✓ Copied to clipboard.[/green] "
+                "Paste directly into GitHub."
+            )
+        except Exception as e:
+            console.print(f"[red]Clipboard error:[/red] {e}")
+
+    # ── NEW ── --create-pr flag: pipe into gh CLI
+    if create_pr:
+        create_github_pr(validated, summary)
 
 
-# =========================================================
-# TERMINAL OUTPUT RENDERER
-# =========================================================
-
-def render_output(
-    result: dict,
-    summary: dict
-):
-
+def render_output(result, summary: dict, reviewer_data: dict):
+    """
+    Renders the validated PRDescription to the terminal.
+    Uses Rich panels for a clean, readable layout.
+    """
     console.print()
 
-    # PR TITLE
-    console.print(
+    # Title panel
+    console.print(Panel(
+        f"[bold]{result.title}[/bold]",
+        title="PR Title",
+        border_style="blue",
+    ))
 
-        Panel(
+    # Summary panel
+    console.print(Panel(
+        result.summary,
+        title="Summary",
+        border_style="cyan",
+    ))
 
-            f"[bold]{result.get('title', '')}[/bold]",
+    # Changes panel
+    if result.changes:
+        change_text = "\n".join(f"• {c}" for c in result.changes)
+        console.print(Panel(
+            change_text,
+            title="Changes",
+            border_style="green"
+        ))
 
-            title="PR Title",
+    # Risks panel
+    if result.risks:
+        risk_text = "\n".join(f"⚠ {r}" for r in result.risks)
+        console.print(Panel(
+            risk_text,
+            title="Risks",
+            border_style="red"
+        ))
 
-            border_style="blue",
-        )
+    # Notes panel (includes reviewer suggestions now)
+    if result.notes and result.notes.strip():
+        console.print(Panel(
+            result.notes,
+            title="Notes",
+            border_style="yellow"
+        ))
+
+    # ── NEW ── Reviewer table (only shown if CODEOWNERS exists)
+    if reviewer_data["codeowners_found"] and reviewer_data["file_ownership"]:
+        console.print()
+        table = Table(title="File Ownership", border_style="dim")
+        table.add_column("File", style="cyan")
+        table.add_column("Owners", style="yellow")
+        for fname, owners in reviewer_data["file_ownership"].items():
+            table.add_row(fname, ", ".join(owners))
+        console.print(table)
+
+    # ── Markdown output (ready to copy) ────────────────────────────────
+    from src.formatter import to_markdown
+    md = to_markdown(result, summary)
+    console.print("\n[bold]Markdown Output:[/bold]")
+    console.print(Syntax(md, "markdown", theme="monokai"))
+
+
+def create_github_pr(result, summary: dict):
+    """
+    Creates a GitHub Pull Request using the GitHub CLI (`gh`).
+    
+    `gh` is GitHub's official CLI tool. `gh pr create` opens a PR
+    with a given title and body. We pipe our generated markdown as the body.
+    
+    Prerequisite: user must have `gh` installed and authenticated.
+    We check for this and give a clear error if not.
+    """
+
+    # Check if gh is installed
+    check = subprocess.run(
+        ["gh", "--version"],
+        capture_output=True,
+        text=True,
     )
-
-    # SUMMARY
-    console.print(
-
-        Panel(
-
-            result.get("summary", ""),
-
-            title="Summary",
-
-            border_style="cyan",
-        )
-    )
-
-    # CHANGES
-    changes = result.get("changes", [])
-
-    if changes:
-
-        text = "\n".join(
-            f"• {c}" for c in changes
-        )
-
+    if check.returncode != 0:
         console.print(
-
-            Panel(
-                text,
-                title="Changes",
-                border_style="green",
-            )
+            "[red]GitHub CLI not found.[/red]\n"
+            "Install it from: https://cli.github.com\n"
+            "Then run: gh auth login"
         )
+        return
 
-    # RISKS
-    risks = result.get("risks", [])
+    # Build the PR body using the GitHub-specific formatter
+    from src.formatter import to_github_body
+    body = to_github_body(result, summary)
 
-    if risks:
+    console.print("\n[bold]Creating GitHub PR...[/bold]")
 
-        text = "\n".join(
-            f"⚠ {r}" for r in risks
-        )
+    # Run gh pr create
+    # --title sets the PR title
+    # --body sets the PR description
+    # --web opens the PR in the browser after creation
+    proc = subprocess.run(
+        [
+            "gh", "pr", "create",
+            "--title", result.title,
+            "--body", body,
+            "--web",    # Opens browser so user can review before submitting
+        ],
+        text=True,
+    )
 
+    if proc.returncode == 0:
+        console.print("[green]✓ PR created successfully.[/green]")
+    else:
         console.print(
-
-            Panel(
-                text,
-                title="Risks",
-                border_style="red",
-            )
+            "[red]gh pr create failed.[/red]\n"
+            "Make sure you're on a branch (not main) and "
+            "have run: gh auth login"
         )
 
-    # NOTES
-    notes = result.get("notes", "")
-
-    if notes:
-
-        console.print(
-
-            Panel(
-                notes,
-                title="Notes",
-                border_style="yellow",
-            )
-        )
-
-    # MARKDOWN OUTPUT
-    markdown = build_markdown(
-        result,
-        summary
-    )
-
-    console.print(
-        "\n[bold]Markdown Output:[/bold]"
-    )
-
-    console.print(
-
-        Syntax(
-            markdown,
-            "markdown",
-            theme="monokai",
-            line_numbers=False,
-        )
-    )
-
-
-# =========================================================
-# MARKDOWN BUILDER
-# =========================================================
-
-def build_markdown(
-    result: dict,
-    summary: dict
-) -> str:
-
-    lines = []
-
-    lines.append(
-        f"## {result.get('title', '')}\n"
-    )
-
-    lines.append(
-        f"### Summary\n"
-        f"{result.get('summary', '')}\n"
-    )
-
-    changes = result.get("changes", [])
-
-    if changes:
-
-        lines.append("### Changes")
-
-        for c in changes:
-
-            lines.append(f"- {c}")
-
-        lines.append("")
-
-    risks = result.get("risks", [])
-
-    if risks:
-
-        lines.append(
-            "### ⚠️ Risks / Review Notes"
-        )
-
-        for r in risks:
-
-            lines.append(f"- {r}")
-
-        lines.append("")
-
-    lines.append(
-        "---\n"
-        f"_Generated by git-pr-summarizer | "
-        f"{summary['total_files']} files changed, "
-        f"+{summary['total_added']}/"
-        f"-{summary['total_removed']} lines_"
-    )
-
-    return "\n".join(lines)
-
-
-# =========================================================
-# ENTRY POINT
-# =========================================================
 
 if __name__ == "__main__":
     app()
