@@ -1,6 +1,0 @@
-typer
-gitpython
-httpx
-tiktoken
-rich
-python-dotenv
