@@ -1,21 +1,22 @@
-# Python cache
+# Python cache — never commit these
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
-# Virtual environment
+# Virtual environment — never commit this
 venv/
 .venv/
+env/
 
 # Package build artifacts
 *.egg-info/
 dist/
 build/
 
-# OS files
-Thumbs.db
-.DS_Store
+# Environment variables — never commit API keys
+.env
 
-# Editor
-.vscode/
-.idea/
+# OS files
+.DS_Store
+Thumbs.db

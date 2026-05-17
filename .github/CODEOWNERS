@@ -1,0 +1,21 @@
+# CODEOWNERS — assign reviewers by file pattern
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything not matched below
+* @AyuG619
+
+# Python files
+*.py @AyuG619
+
+# Auth and security — always needs careful review
+src/auth/ @AyuG619
+
+# Database migrations
+**/migrations/ @AyuG619
+
+# Frontend
+*.ts @AyuG619
+*.tsx @AyuG619
+
+# CI/CD config
+.github/ @AyuG619

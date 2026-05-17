@@ -1,0 +1,2 @@
+[console_scripts]
+pr-summarize = src.cli:app
