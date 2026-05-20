@@ -80,6 +80,12 @@ def parse_diff(diff_text: str) -> list[FileDiff]:
         # ── Detect start of a new file ──────────────────────────────────
         # "diff --git a/old_path b/new_path" marks the beginning of each file's diff
         if line.startswith("diff --git "):
+            # ── ADD THESE 4 LINES ──
+            parts_check = line.split(" ")
+            raw_check = parts_check[-1][2:] if parts_check[-1].startswith("b/") else parts_check[-1]
+            if "__pycache__" in raw_check or raw_check.endswith(".pyc"):
+                continue   # Skip compiled Python files entirely
+            # ── END ADD ──
             # If we were already tracking a file, save it before starting a new one
             if current_file is not None:
                 if current_hunk is not None:

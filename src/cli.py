@@ -1,6 +1,6 @@
 # src/cli.py
 import subprocess
-import sys
+import os
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -12,24 +12,25 @@ from src.parser import parse_diff, get_diff_summary
 from src.chunker import chunk_files
 from src.llm import analyze_diff_chunk, merge_results
 from src.config import DEFAULT_PROVIDER
-
-# ── NEW ── Import the three new modules
 from src.validator import safe_validate
 from src.formatter import to_markdown, to_github_body
 from src.codeowners import suggest_reviewers, create_sample_codeowners
 
-app = typer.Typer(help="AI-powered git PR description generator.")
+app = typer.Typer(
+    help="AI-powered git PR description generator.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 console = Console()
 
 
 def get_git_diff(base: str = "HEAD~1") -> str:
-    """Runs git diff and returns output as a string."""
     result = subprocess.run(
         ["git", "diff", base],
         capture_output=True,
         text=True,
-        encoding="utf-8",        # ← add this line
-        errors="replace",        # ← add this line — replaces unreadable chars instead of crashing
+        encoding="utf-8",
+        errors="replace",
         cwd=".",
     )
     if result.returncode != 0:
@@ -39,28 +40,33 @@ def get_git_diff(base: str = "HEAD~1") -> str:
 
 
 def get_repo_root() -> str:
-    """Returns the root directory of the current git repo."""
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
-        encoding="utf-8",        # ← add this
-        errors="replace",        # ← add this
+        encoding="utf-8",
+        errors="replace",
         cwd=".",
     )
     if result.returncode != 0:
         return "."
     return result.stdout.strip()
 
-@app.command()
+
+# ── THIS IS THE KEY CHANGE ──────────────────────────────────────────────
+# @app.callback instead of @app.command()
+# This makes `main` the default action when no subcommand is given,
+# while still allowing `pr-summarize configure` to work as a subcommand.
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,           # ← ctx tells us if a subcommand was invoked
     base: str = typer.Option(
         "HEAD~1", "--base", "-b",
         help="Base commit to diff against."
     ),
     provider: str = typer.Option(
         DEFAULT_PROVIDER, "--provider", "-p",
-        help="LLM provider: 'openai' or 'claude'."
+        help="LLM provider: groq, gemini, or ollama."
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run",
@@ -70,36 +76,38 @@ def main(
         False, "--verbose", "-v",
         help="Show chunk previews and extra detail."
     ),
-    # ── NEW ── Copy flag
     copy: bool = typer.Option(
         False, "--copy", "-c",
-        help="Copy the Markdown output to clipboard."
+        help="Copy Markdown output to clipboard."
     ),
-    # ── NEW ── GitHub PR creation flag
     create_pr: bool = typer.Option(
         False, "--create-pr",
         help="Create a GitHub PR using the gh CLI."
     ),
-    # ── NEW ── Init codeowners flag
     init_codeowners: bool = typer.Option(
         False, "--init-codeowners",
-        help="Create a sample CODEOWNERS file in .github/ and exit."
+        help="Create a sample CODEOWNERS file and exit."
     ),
 ):
     """
-    Generate a PR description from your current git diff.
-
+    Generate a PR description from your current git diff.\n
     Examples:\n
         pr-summarize\n
         pr-summarize --base main\n
-        pr-summarize --provider claude --copy\n
+        pr-summarize --provider gemini --copy\n
         pr-summarize --create-pr\n
-        pr-summarize --dry-run --verbose
+        pr-summarize --dry-run --verbose\n
+        pr-summarize configure
     """
 
-    # ── NEW ── Handle --init-codeowners before anything else
+    # If user typed `pr-summarize configure`, ctx.invoked_subcommand
+    # will be "configure" and we return immediately — letting typer
+    # route to the configure() function below instead.
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # ── --init-codeowners ───────────────────────────────────────────────
     if init_codeowners:
-        import os
         github_dir = os.path.join(get_repo_root(), ".github")
         os.makedirs(github_dir, exist_ok=True)
         path = os.path.join(github_dir, "CODEOWNERS")
@@ -111,6 +119,14 @@ def main(
             console.print(f"[green]Created CODEOWNERS at {path}[/green]")
             console.print("Edit it to add your team's GitHub usernames.")
         raise typer.Exit(0)
+
+    # ── Config validation ───────────────────────────────────────────────
+    from src.config import validate_config, CONFIG
+    problems = validate_config(CONFIG)
+    if problems:
+        for p in problems:
+            console.print(f"[red]Config error:[/red] {p}")
+        raise typer.Exit(1)
 
     # ── Step 1: Get diff ────────────────────────────────────────────────
     console.print(f"\n[bold]Fetching diff[/bold] against [cyan]{base}[/cyan]...")
@@ -130,14 +146,13 @@ def main(
         f"[red]-{summary['total_removed']}[/red]"
     )
 
-    # ── NEW ── Show risky files in verbose mode
     if summary["risky_files"]:
         console.print(
             f"[yellow]⚠ Sensitive files:[/yellow] "
             f"{', '.join(summary['risky_files'])}"
         )
 
-    # ── NEW ── Reviewer suggestions from CODEOWNERS
+    # ── CODEOWNERS reviewer suggestions ────────────────────────────────
     repo_root = get_repo_root()
     changed_filenames = [f.filename for f in files]
     reviewer_data = suggest_reviewers(changed_filenames, repo_root=repo_root)
@@ -191,31 +206,25 @@ def main(
                 raise typer.Exit(1)
             progress.advance(task)
 
-    # ── NEW ── Merge + Validate with Pydantic
-    # In Week 1 we passed the raw dict straight to rendering.
-    # Now we merge first, then run through Pydantic validation.
-    # safe_validate() never crashes — it fills in defaults if something is wrong.
+    # ── Step 5: Merge + Validate ────────────────────────────────────────
     merged_raw = merge_results(raw_results)
     validated = safe_validate(merged_raw)
 
-    # ── NEW ── Add reviewer suggestions into the validated result's notes
-    # We append reviewer info to the notes field so it shows up in output.
+    # Append reviewer suggestions into notes
     if reviewer_data["reviewers"]:
-        reviewer_note = (
-            f"Suggested reviewers: {', '.join(reviewer_data['reviewers'])}"
+        reviewer_note = f"Suggested reviewers: {', '.join(reviewer_data['reviewers'])}"
+        validated.notes = (
+            validated.notes + " | " + reviewer_note
+            if validated.notes
+            else reviewer_note
         )
-        if validated.notes:
-            validated.notes = validated.notes + " | " + reviewer_note
-        else:
-            validated.notes = reviewer_note
 
-    # ── Step 5: Render output ───────────────────────────────────────────
+    # ── Step 6: Render ──────────────────────────────────────────────────
     render_output(validated, summary, reviewer_data)
 
-    # ── NEW ── Build the markdown string for copy/gh operations
     markdown_output = to_markdown(validated, summary)
 
-    # ── NEW ── --copy flag: put markdown on clipboard
+    # ── --copy ──────────────────────────────────────────────────────────
     if copy:
         try:
             import pyperclip
@@ -227,59 +236,47 @@ def main(
         except Exception as e:
             console.print(f"[red]Clipboard error:[/red] {e}")
 
-    # ── NEW ── --create-pr flag: pipe into gh CLI
+    # ── --create-pr ─────────────────────────────────────────────────────
     if create_pr:
         create_github_pr(validated, summary)
 
 
 def render_output(result, summary: dict, reviewer_data: dict):
-    """
-    Renders the validated PRDescription to the terminal.
-    Uses Rich panels for a clean, readable layout.
-    """
     console.print()
 
-    # Title panel
     console.print(Panel(
         f"[bold]{result.title}[/bold]",
         title="PR Title",
         border_style="blue",
     ))
 
-    # Summary panel
     console.print(Panel(
         result.summary,
         title="Summary",
         border_style="cyan",
     ))
 
-    # Changes panel
     if result.changes:
-        change_text = "\n".join(f"• {c}" for c in result.changes)
         console.print(Panel(
-            change_text,
+            "\n".join(f"• {c}" for c in result.changes),
             title="Changes",
-            border_style="green"
+            border_style="green",
         ))
 
-    # Risks panel
     if result.risks:
-        risk_text = "\n".join(f"⚠ {r}" for r in result.risks)
         console.print(Panel(
-            risk_text,
+            "\n".join(f"⚠ {r}" for r in result.risks),
             title="Risks",
-            border_style="red"
+            border_style="red",
         ))
 
-    # Notes panel (includes reviewer suggestions now)
     if result.notes and result.notes.strip():
         console.print(Panel(
             result.notes,
             title="Notes",
-            border_style="yellow"
+            border_style="yellow",
         ))
 
-    # ── NEW ── Reviewer table (only shown if CODEOWNERS exists)
     if reviewer_data["codeowners_found"] and reviewer_data["file_ownership"]:
         console.print()
         table = Table(title="File Ownership", border_style="dim")
@@ -289,25 +286,12 @@ def render_output(result, summary: dict, reviewer_data: dict):
             table.add_row(fname, ", ".join(owners))
         console.print(table)
 
-    # ── Markdown output (ready to copy) ────────────────────────────────
-    from src.formatter import to_markdown
     md = to_markdown(result, summary)
     console.print("\n[bold]Markdown Output:[/bold]")
     console.print(Syntax(md, "markdown", theme="monokai"))
 
 
 def create_github_pr(result, summary: dict):
-    """
-    Creates a GitHub Pull Request using the GitHub CLI (`gh`).
-    
-    `gh` is GitHub's official CLI tool. `gh pr create` opens a PR
-    with a given title and body. We pipe our generated markdown as the body.
-    
-    Prerequisite: user must have `gh` installed and authenticated.
-    We check for this and give a clear error if not.
-    """
-
-    # Check if gh is installed
     check = subprocess.run(
         ["gh", "--version"],
         capture_output=True,
@@ -316,28 +300,19 @@ def create_github_pr(result, summary: dict):
     if check.returncode != 0:
         console.print(
             "[red]GitHub CLI not found.[/red]\n"
-            "Install it from: https://cli.github.com\n"
+            "Install from: https://cli.github.com\n"
             "Then run: gh auth login"
         )
         return
 
-    # Build the PR body using the GitHub-specific formatter
-    from src.formatter import to_github_body
     body = to_github_body(result, summary)
-
     console.print("\n[bold]Creating GitHub PR...[/bold]")
 
-    # Run gh pr create
-    # --title sets the PR title
-    # --body sets the PR description
-    # --web opens the PR in the browser after creation
     proc = subprocess.run(
-        [
-            "gh", "pr", "create",
-            "--title", result.title,
-            "--body", body,
-            "--web",    # Opens browser so user can review before submitting
-        ],
+        ["gh", "pr", "create",
+         "--title", result.title,
+         "--body", body,
+         "--web"],
         text=True,
     )
 
@@ -346,9 +321,44 @@ def create_github_pr(result, summary: dict):
     else:
         console.print(
             "[red]gh pr create failed.[/red]\n"
-            "Make sure you're on a branch (not main) and "
-            "have run: gh auth login"
+            "Make sure you're on a branch and have run: gh auth login"
         )
+
+
+@app.command("configure")
+def configure():
+    """Save API keys and preferences to ~/.pr-summarizer.toml"""
+    from src.config import save_config, CONFIG_FILE
+
+    console.print("\n[bold]PR Summarizer — Setup[/bold]")
+    console.print(f"Config will be saved to: [cyan]{CONFIG_FILE}[/cyan]\n")
+
+    provider = typer.prompt("Default provider (groq/gemini/ollama)", default="groq")
+    while provider not in ("groq", "gemini", "ollama"):
+        console.print("[red]Must be one of: groq, gemini, ollama[/red]")
+        provider = typer.prompt("Default provider", default="groq")
+
+    updates = {"provider": provider}
+
+    if provider == "groq":
+        key = typer.prompt("Groq API key", hide_input=True)
+        updates["groq_api_key"] = key
+        updates["groq_model"] = "llama-3.3-70b-versatile"
+
+    elif provider == "gemini":
+        key = typer.prompt("Gemini API key", hide_input=True)
+        updates["gemini_api_key"] = key
+        updates["gemini_model"] = "gemini-2.5-pro"
+
+    elif provider == "ollama":
+        host = typer.prompt("Ollama host", default="http://localhost:11434")
+        model = typer.prompt("Ollama model", default="codellama")
+        updates["ollama_host"] = host
+        updates["ollama_model"] = model
+
+    save_config(updates)
+    console.print(f"\n[green]✓ Config saved to {CONFIG_FILE}[/green]")
+    console.print("Run [bold]pr-summarize[/bold] to test it.")
 
 
 if __name__ == "__main__":
