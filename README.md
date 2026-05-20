@@ -74,6 +74,9 @@ pr-summarize --init-codeowners
 ---
 
 ## Example Output
+
+
+```text
 Found 3 changed file(s) — +47 / -12
 ⚠ Sensitive files: src/auth/login.py
 Suggested reviewers: @backend-team
@@ -82,18 +85,10 @@ Suggested reviewers: @backend-team
 │ Add bcrypt password hashing to login flow   │
 └─────────────────────────────────────────────┘
 
-
-
-
-
 ┌─ Summary ───────────────────────────────────┐
 │ Replaces plaintext password comparison with │
 │ bcrypt hashing. Adds login attempt logging. │
 └─────────────────────────────────────────────┘
-
-
-
-
 
 ┌─ Changes ───────────────────────────────────┐
 │ • Add bcrypt dependency                     │
@@ -101,14 +96,10 @@ Suggested reviewers: @backend-team
 │ • Add log_attempt() call on login           │
 └─────────────────────────────────────────────┘
 
-
-
-
-
 ┌─ Risks ─────────────────────────────────────┐
 │ ⚠ Touches authentication logic              │
 └─────────────────────────────────────────────┘
-
+```
 ---
 
 ## How it works
