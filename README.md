@@ -26,7 +26,7 @@ No copy-pasting code into ChatGPT. One command, directly in your terminal.
 ```bash
 git clone https://github.com/AyuG619/git-pr-summarizer
 cd git-pr-summarizer
-python -m venv venv
+python -m venv pr_sum
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -e .
 ```
