@@ -1,20 +1,21 @@
-# Python cache — never commit these
+# Python cache ï¿½ never commit these
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Virtual environment — never commit this
+# Virtual environment ï¿½ never commit this
 venv/
 .venv/
 env/
+pr_sum/
 
 # Package build artifacts
 *.egg-info/
 dist/
 build/
 
-# Environment variables — never commit API keys
+# Environment variables ï¿½ never commit API keys
 .env
 
 # OS files
