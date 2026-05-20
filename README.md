@@ -103,6 +103,7 @@ Suggested reviewers: @backend-team
 ---
 
 ## How it works
+```text
 git diff
 ↓
 Diff Parser        — splits by file, hunk, +/- lines
@@ -114,3 +115,4 @@ LLM (Groq/Gemini)  — structured JSON prompt, schema-enforced response
 Pydantic Validator — type checking, tense correction, fallback handling
 ↓
 Formatter          — GitHub Markdown, clipboard, gh pr create
+```
